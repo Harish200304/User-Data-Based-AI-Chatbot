@@ -54,16 +54,25 @@ def build_chart_from_question(question: str, df: pd.DataFrame):
     if not question or df is None:
         return None
     text = question.lower()
-    if 'pie' in text or 'distribution' in text or 'proportion' in text:
-        chart_type = 'pie'
-    elif 'bar' in text or 'column chart' in text or 'type vs' in text or 'vs amount' in text:
+
+    # Respect the chart type the user explicitly asked for.
+    # Words like "distribution" describe the analysis, not necessarily a pie chart.
+    if any(term in text for term in ['stacked column', 'stacked bar', 'stacked']):
+        chart_type = 'stacked'
+    elif any(term in text for term in ['bar chart', 'bar graph', 'column chart', 'using bar', 'using column']):
         chart_type = 'bar'
-    elif 'scatter' in text:
-        chart_type = 'scatter'
+    elif any(term in text for term in ['pie chart', 'donut chart', 'doughnut chart', 'using pie']):
+        chart_type = 'pie'
     elif 'histogram' in text:
         chart_type = 'histogram'
+    elif 'scatter' in text:
+        chart_type = 'scatter'
     elif 'line' in text or 'trend' in text:
         chart_type = 'line'
+    elif 'distribution' in text or 'proportion' in text or 'share of' in text:
+        chart_type = 'pie'
+    elif ' vs ' in text or ' vs.' in text or 'by ' in text:
+        chart_type = 'bar'
     else:
         return None
 
@@ -96,11 +105,25 @@ def build_chart_from_question(question: str, df: pd.DataFrame):
     elif chart_type == 'bar':
         if x_col and y_col:
             title = 'Bar chart of ' + y_col + ' by ' + x_col
-            return px.bar(df, x=x_col, y=y_col, title=title)
+            agg = df.groupby(x_col, dropna=False)[y_col].sum().reset_index()
+            return px.bar(agg, x=x_col, y=y_col, title=title)
         if x_col:
             vc = df[x_col].value_counts().reset_index()
             vc.columns = [x_col, 'count']
             return px.bar(vc, x=x_col, y='count', title=f'Count by {x_col}')
+    elif chart_type == 'stacked':
+        categorical_cols = [
+            col for col in df.columns
+            if not pd.api.types.is_numeric_dtype(df[col])
+        ]
+        if len(categorical_cols) >= 2:
+            x_col = x_col or categorical_cols[0]
+            color_col = next((col for col in categorical_cols if col != x_col), categorical_cols[0])
+            if y_col and pd.api.types.is_numeric_dtype(df[y_col]):
+                agg = df.groupby([x_col, color_col], dropna=False)[y_col].sum().reset_index()
+                return px.bar(agg, x=x_col, y=y_col, color=color_col, title=f'{y_col} by {x_col} and {color_col}')
+            agg = df.groupby([x_col, color_col], dropna=False).size().reset_index(name='count')
+            return px.bar(agg, x=x_col, y='count', color=color_col, title=f'Count by {x_col} and {color_col}')
     elif chart_type == 'line' and x_col and y_col:
         return px.line(df, x=x_col, y=y_col, title=f'{y_col} over {x_col}')
     elif chart_type == 'scatter' and x_col and y_col:
@@ -108,6 +131,30 @@ def build_chart_from_question(question: str, df: pd.DataFrame):
     elif chart_type == 'histogram' and x_col:
         return px.histogram(df, x=x_col, title=f'Distribution of {x_col}')
     return None
+
+
+def is_visualization_question(question: str) -> bool:
+    text = question.lower()
+    keywords = [
+        'visualize', 'visualization', 'chart', 'graph', 'plot',
+        'pie', 'bar', 'histogram', 'stacked', 'column chart',
+        'distribution', 'vs'
+    ]
+    return any(keyword in text for keyword in keywords)
+
+
+def render_visualization_response(question: str, df: pd.DataFrame) -> bool:
+    fig = build_chart_from_question(question, df)
+    if fig is None:
+        st.warning("I could not identify the columns for this visualization. Try: content type vs shares using bar chart")
+        return False
+
+    viz_tab, data_tab = st.tabs(["Visualization", "Actual Data"])
+    with viz_tab:
+        st.plotly_chart(fig, use_container_width=True)
+    with data_tab:
+        st.dataframe(df, use_container_width=True)
+    return True
 
 # Page configuration
 st.set_page_config(
@@ -369,6 +416,12 @@ if df is not None and context:
             with st.chat_message(message["role"]):
                 if isinstance(message["content"], str):
                     st.markdown(message["content"])
+                elif (
+                    isinstance(message["content"], dict)
+                    and message["content"].get("type") == "visualization"
+                    and df is not None
+                ):
+                    render_visualization_response(message["content"].get("question", ""), df)
                 else:
                     st.json(message["content"])
     
@@ -392,6 +445,19 @@ if df is not None and context:
         with st.chat_message("assistant"):
             with st.spinner("🔍 Analyzing data and generating insights..."):
                 try:
+                    if is_visualization_question(question):
+                        shown = render_visualization_response(question, df)
+                        response_content = {
+                            "type": "visualization",
+                            "question": question,
+                            "rendered": shown,
+                        }
+                        st.session_state.chat_history.append({
+                            "role": "assistant",
+                            "content": response_content
+                        })
+                        st.stop()
+
                     # Build intelligent context
                     if smart_context and SmartChatContext:
                         chat_prompt = smart_context.build_chat_prompt()
