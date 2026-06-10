@@ -23,7 +23,15 @@ def load_table(uploaded_file, filename):
     if suffix == ".csv":
         return pd.read_csv(uploaded_file)
 
-    if suffix in [".xlsx", ".xls"]:
+    if suffix == ".xlsx":
+        try:
+            return pd.read_excel(BytesIO(uploaded_file.read()), engine="openpyxl")
+        except ImportError as exc:
+            raise ImportError(
+                "Excel .xlsx support requires openpyxl. Run: pip install openpyxl"
+            ) from exc
+
+    if suffix == ".xls":
         return pd.read_excel(BytesIO(uploaded_file.read()))
 
     raise ValueError("Unsupported file type")
